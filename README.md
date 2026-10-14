@@ -34,11 +34,13 @@ Combined annotated output (boxes + track IDs + lane overlay)
 - Laptop GPU: **GTX 1650, 4GB VRAM** (a deliberately modest, consumer-grade target)
 - CPU: i5, 9th gen | RAM: 16GB
 - Python 3.12, PyTorch 2.5.1 (CUDA 12.1)
-- Key dependencies: `ultralytics`, `segmentation-models-pytorch`, `albumentations`, `opencv-python`
+- Key dependencies: `ultralytics`, `segmentation-models-pytorch`, `albumentations`, `opencv-python`, `fiftyone` (data), `pycocotools` (detection scoring)
 
 ## Results
 
-Evaluated on a held-out test set of **614 images** (never used in training or validation), drawn from BDD100K.
+Both models are evaluated on the same held-out test set of **614 BDD100K images** (never used in training or validation).
+
+### Drivable-area segmentation
 
 | Model | Mean IoU (dataset-level) | Mean IoU (per image) | Drivable IoU (binary) |
 |---|---|---|---|
@@ -72,11 +74,41 @@ Per-condition breakdown (fine-tuned model). Here each image's IoU is averaged ov
 | Rainy | 0.7590 |
 | Snowy | 0.7407 |
 
+The weather and time-of-day labels behind this table were cross-checked against the dataset for all 614 images (by `evaluate_detection.py`).
+
+### Object detection (YOLOv8s, stock COCO weights)
+
+The detector runs with its COCO-pretrained weights; it is not fine-tuned on BDD100K. Its classes are mapped to BDD100K's and it is scored against BDD100K's own box labels with pycocotools (the standard COCO evaluation), at the pipeline's inference size of 640.
+
+| Class | Labelled boxes | AP50 | AP (IoU 0.50:0.95) |
+|---|---|---|---|
+| Car | 5,988 | 0.535 | 0.316 |
+| Traffic light | 1,751 | 0.185 | 0.062 |
+| Pedestrian | 685 | 0.458 | 0.222 |
+| Truck | 217 | 0.287 | 0.200 |
+| Bus | 92 | 0.315 | 0.255 |
+| Bicycle | 39 | 0.227 | 0.076 |
+| Motorcycle | 24 | 0.275 | 0.083 |
+| Train | 1 | 0.500 | 0.400 (a single object, not meaningful) |
+| **Mean** | | **0.348** | **0.202** |
+
+| Time of day | Images | mAP50 | mAP |
+|---|---|---|---|
+| Daytime | 217 | 0.465 | 0.287 |
+| Night | 390 | 0.276 | 0.145 |
+| Dawn/dusk | 7 | 0.239 | 0.167 |
+
+What these numbers show:
+- **One in five labelled objects cannot be detected at all.** COCO has no class for traffic signs (2,180 boxes) or riders (44), so 2,224 of the 11,025 labelled objects (20.2%) are outside what the stock detector can output. They are left out of the mAP above, so the mAP overstates how much of the scene the detector covers.
+- **Small objects are the weak spot:** AP 0.036 on small objects against 0.486 on large ones (COCO size bins). Traffic lights, mostly small, score 0.062.
+- **Night halves detection accuracy:** mAP 0.145 at night against 0.287 in daytime. The segmentation model, fine-tuned with night images, shows no such drop.
+
 **Speed:** ~13–14 FPS combined pipeline on the GTX 1650, with segmentation running every 3rd frame. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
 
 ## Known limitations
 
 - **Portrait, handheld, or cabin-visible footage is out of scope.** The model was trained exclusively on BDD100K's landscape, windshield-mounted dashcam footage, which never shows a car's interior/dashboard. Tested directly on a handheld, portrait-orientation night/rain clip, the model correctly ignored sky/hillside/highway background but misclassified the visible dashboard as drivable area — a genuine domain-gap limitation, not a bug. **The pipeline is intended for forward-facing, dashcam-style footage (landscape, mounted, no visible cabin).**
+- **The detector uses stock COCO weights:** it cannot detect traffic signs or riders, and it is weak on small objects and at night (see [Object detection](#object-detection-yolov8s-stock-coco-weights)).
 - **~13–14 FPS**, below real-time (30 FPS). Framed here as "near-real-time" / efficient offline processing rather than a live system.
 - Evaluated only on BDD100K-style US driving footage; robustness to other geographies, camera setups, or lighting extremes beyond the test set's distribution is untested.
 
@@ -85,7 +117,8 @@ Per-condition breakdown (fine-tuned model). Here each image's IoU is averaged ov
 ```
 pipeline.py                  # Main inference pipeline (detection + tracking + segmentation)
 finetune_drivable.py         # Fine-tuning script for the segmentation model
-evaluate_test_set.py         # Evaluation on the held-out test set (mIoU, per-condition breakdown)
+evaluate_test_set.py         # Segmentation evaluation on the held-out test set (mIoU, per-condition breakdown)
+evaluate_detection.py        # Detection evaluation on the same test set (COCO mAP, per class, day/night)
 export_test_metadata.py      # Generates test/metadata.json used by evaluate_test_set.py
 test_meaningless_input.py    # Diagnostic: detects majority-class shortcut learning
 definitive_class_check.py    # Verifies the drivable-area label mapping (polygon-to-pixel)
@@ -101,5 +134,6 @@ Model checkpoints (`.pth`), video outputs (`.mp4`), and the BDD100K dataset subs
 2. Obtain the BDD100K drivable-area subset (via `fiftyone`, dataset `dgural/bdd100k`) and place it as `bdd100k_drivable_subset/`
 3. Run `export_test_metadata.py` once to generate `test/metadata.json`
 4. Run `finetune_drivable.py` to train, or supply your own `drivable_finetuned.pth`
-5. Run `evaluate_test_set.py` to reproduce the mIoU results above
-6. Run `pipeline.py` on a video file to generate the combined annotated output
+5. Run `evaluate_test_set.py` to reproduce the segmentation results above
+6. Run `evaluate_detection.py` (needs `pycocotools`) to reproduce the detection results
+7. Run `pipeline.py` on a video file to generate the combined annotated output
