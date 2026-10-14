@@ -13,7 +13,15 @@ print(f"Using device: {device}")
 DATA_ROOT = "bdd100k_drivable_subset"
 NUM_CLASSES = 3
 INPUT_HEIGHT, INPUT_WIDTH = 320, 640
-CLASS_NAMES = ["background", "direct", "alternative"]
+
+# BDD100K drivable-area mask values, verified with definitive_class_check.py
+# (polygon-to-pixel cross-check) and used the same way in pipeline.py.
+# The order matters: every per-class number below is reported in this order.
+DIRECT, ALTERNATIVE, BACKGROUND = 0, 1, 2
+CLASS_NAMES = ["direct (ego lane)", "alternative (adjacent lane)", "background"]
+
+# Cityscapes train ID of "road" in the 19-class baseline model
+CITYSCAPES_ROAD = 0
 
 test_transform = A.Compose([
     A.Resize(height=INPUT_HEIGHT, width=INPUT_WIDTH),
@@ -27,14 +35,15 @@ def load_finetuned_model():
         nn.Conv2d(256, NUM_CLASSES, kernel_size=1),
         nn.UpsamplingBilinear2d(scale_factor=4.0),
     )
-    model.load_state_dict(torch.load("drivable_finetuned.pth", map_location=device))
+    model.load_state_dict(torch.load("drivable_finetuned.pth", map_location=device, weights_only=True))
     return model.eval().to(device)
 
 
 def load_baseline_model():
-    # Original 19-class Cityscapes model. We map its "road" class (0) to our
-    # "direct" class (1) for a fair-ish comparison -- it was never trained on
-    # our 3-class scheme, so this is an approximation, not a perfect apples-to-apples test.
+    # Original 19-class Cityscapes model, no fine-tuning. Its "road" class is mapped to
+    # DIRECT and everything else to BACKGROUND (see evaluate()). Cityscapes has no notion
+    # of ego vs adjacent lane, so the 3-class numbers are only an approximation for it;
+    # the binary drivable IoU (direct + alternative vs background) is the fairer comparison.
     model = smp.from_pretrained("smp-hub/segformer-b0-640x1280-city-160k")
     return model.eval().to(device)
 
@@ -53,9 +62,27 @@ def compute_iou_per_class(pred, target, num_classes):
     return ious
 
 
+def dataset_iou_per_class(confusion):
+    """Standard (dataset-level) IoU: intersections and unions summed over all test images."""
+    intersection = np.diag(confusion).astype(float)
+    union = confusion.sum(axis=0) + confusion.sum(axis=1) - np.diag(confusion)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return intersection / union
+
+
+def drivable_iou(confusion):
+    """Binary IoU of drivable (direct + alternative) against background, over all test images."""
+    drivable = [DIRECT, ALTERNATIVE]
+    intersection = confusion[np.ix_(drivable, drivable)].sum()
+    union = confusion[drivable, :].sum() + confusion[:, drivable].sum() - intersection
+    return intersection / union
+
+
 def evaluate(model, is_baseline, test_img_dir, test_mask_dir):
     filenames = sorted(os.listdir(test_img_dir))
     all_ious = []
+    # rows: true class, columns: predicted class, summed over all test images
+    confusion = np.zeros((NUM_CLASSES, NUM_CLASSES), dtype=np.int64)
 
     with torch.no_grad():
         for i, fname in enumerate(filenames):
@@ -70,15 +97,20 @@ def evaluate(model, is_baseline, test_img_dir, test_mask_dir):
             pred = output.argmax(dim=1).squeeze(0).cpu().numpy()
 
             if is_baseline:
-                # Baseline outputs 19 Cityscapes classes. Map class 0 ("road") to our
-                # "direct" (1); everything else becomes "background" (0). We have no
-                # equivalent for "alternative" in the baseline, so it can never predict that class.
-                mapped_pred = np.zeros_like(pred)
-                mapped_pred[pred == 0] = 1  # Cityscapes "road" -> our "direct"
+                # Cityscapes "road" -> DIRECT, everything else -> BACKGROUND. The baseline
+                # has no equivalent for "alternative", so it can never predict that class.
+                mapped_pred = np.full_like(pred, BACKGROUND)
+                mapped_pred[pred == CITYSCAPES_ROAD] = DIRECT
                 pred = mapped_pred
 
             ious = compute_iou_per_class(pred, target, NUM_CLASSES)
             all_ious.append(ious)
+
+            valid = target < NUM_CLASSES
+            confusion += np.bincount(
+                NUM_CLASSES * target[valid].astype(np.int64) + pred[valid].astype(np.int64),
+                minlength=NUM_CLASSES ** 2,
+            ).reshape(NUM_CLASSES, NUM_CLASSES)
 
             if (i + 1) % 100 == 0:
                 print(f"  Evaluated {i + 1}/{len(filenames)}")
@@ -86,7 +118,7 @@ def evaluate(model, is_baseline, test_img_dir, test_mask_dir):
     all_ious = np.array(all_ious, dtype=float)
     mean_iou_per_class = np.nanmean(all_ious, axis=0)
     overall_miou = np.nanmean(mean_iou_per_class)
-    return mean_iou_per_class, overall_miou, all_ious, filenames
+    return mean_iou_per_class, overall_miou, all_ious, filenames, confusion
 
 
 def breakdown_by_condition(all_ious, filenames, metadata_by_filename, label):
@@ -100,9 +132,28 @@ def breakdown_by_condition(all_ious, filenames, metadata_by_filename, label):
             value = meta.get(key, "unknown")
             groups.setdefault((key, value), []).append(miou)
 
-    print(f"  --- {label}: breakdown by condition ---")
+    print(f"  --- {label}: breakdown by condition (per-image mIoU) ---")
     for (key, value), scores in sorted(groups.items()):
         print(f"  {key}={value}: mean IoU = {np.nanmean(scores):.4f} (n={len(scores)})")
+
+
+def report(label, per_class, miou, all_ious, filenames, confusion):
+    """Print both metrics for one model and return its dataset-level numbers for the summary."""
+    print(f"  Per-image IoU (averaged over images, classes absent from an image skipped):")
+    for name, iou in zip(CLASS_NAMES, per_class):
+        print(f"    {name}: {iou:.4f}")
+    print(f"    Mean IoU: {miou:.4f}")
+
+    dataset_per_class = dataset_iou_per_class(confusion)
+    dataset_miou = np.nanmean(dataset_per_class)
+    binary = drivable_iou(confusion)
+    print(f"  Dataset-level IoU (standard: summed over all test images):")
+    for name, iou in zip(CLASS_NAMES, dataset_per_class):
+        print(f"    {name}: {iou:.4f}")
+    print(f"    Mean IoU: {dataset_miou:.4f}")
+    print(f"  Drivable vs background IoU (binary, dataset-level): {binary:.4f}")
+    breakdown_by_condition(all_ious, filenames, metadata_by_filename, label)
+    return miou, dataset_miou, binary
 
 
 test_img_dir = os.path.join(DATA_ROOT, "test", "images")
@@ -114,26 +165,16 @@ with open(os.path.join(DATA_ROOT, "test", "metadata.json")) as f:
 metadata_by_filename = {m["filename"]: m for m in metadata_list}
 
 print("=== Baseline (original Cityscapes-pretrained, no fine-tuning) ===")
-baseline_model = load_baseline_model()
-baseline_per_class, baseline_miou, baseline_all_ious, baseline_filenames = evaluate(
-    baseline_model, is_baseline=True, test_img_dir=test_img_dir, test_mask_dir=test_mask_dir)
-for name, iou in zip(CLASS_NAMES, baseline_per_class):
-    print(f"  {name}: {iou:.4f}")
-print(f"  Mean IoU: {baseline_miou:.4f}")
-breakdown_by_condition(baseline_all_ious, baseline_filenames, metadata_by_filename, "Baseline")
+baseline = report("Baseline", *evaluate(
+    load_baseline_model(), is_baseline=True, test_img_dir=test_img_dir, test_mask_dir=test_mask_dir))
 print()
 
 print("=== Fine-tuned model ===")
-finetuned_model = load_finetuned_model()
-finetuned_per_class, finetuned_miou, finetuned_all_ious, finetuned_filenames = evaluate(
-    finetuned_model, is_baseline=False, test_img_dir=test_img_dir, test_mask_dir=test_mask_dir)
-for name, iou in zip(CLASS_NAMES, finetuned_per_class):
-    print(f"  {name}: {iou:.4f}")
-print(f"  Mean IoU: {finetuned_miou:.4f}")
-breakdown_by_condition(finetuned_all_ious, finetuned_filenames, metadata_by_filename, "Fine-tuned")
+finetuned = report("Fine-tuned", *evaluate(
+    load_finetuned_model(), is_baseline=False, test_img_dir=test_img_dir, test_mask_dir=test_mask_dir))
 print()
 
 print("=== Summary ===")
-print(f"Baseline mIoU:   {baseline_miou:.4f}")
-print(f"Fine-tuned mIoU: {finetuned_miou:.4f}")
-print(f"Absolute improvement: {finetuned_miou - baseline_miou:+.4f}")
+print(f"{'':28}{'Baseline':>10}{'Fine-tuned':>12}")
+for name, b, f in zip(["Per-image mIoU", "Dataset-level mIoU", "Drivable IoU (binary)"], baseline, finetuned):
+    print(f"{name:28}{b:10.4f}{f:12.4f}")

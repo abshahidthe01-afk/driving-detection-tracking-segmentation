@@ -40,18 +40,24 @@ Combined annotated output (boxes + track IDs + lane overlay)
 
 Evaluated on a held-out test set of **614 images** (never used in training or validation), drawn from BDD100K.
 
-| Model | Mean IoU |
-|---|---|
-| Baseline (Cityscapes-pretrained, no fine-tuning) | 0.0427 |
-| **Fine-tuned (shipped checkpoint)** | **0.7520** |
+| Model | Mean IoU (per image) | Mean IoU (dataset-level) | Drivable IoU (binary) |
+|---|---|---|---|
+| Baseline (Cityscapes-pretrained, no fine-tuning) | _re-run pending_ | _re-run pending_ | _re-run pending_ |
+| **Fine-tuned (shipped checkpoint)** | **0.7520** | _re-run pending_ | _re-run pending_ |
 
-Per-class IoU (fine-tuned model):
+- **Per image:** IoU computed for each image, then averaged over images (a class absent from an image is skipped for that image).
+- **Dataset-level:** intersections and unions summed over the whole test set, then divided (the usual definition of mIoU).
+- **Drivable IoU:** ego and adjacent lane together against background. This is the fairest comparison for the baseline, which has one "road" class and no notion of ego vs adjacent lane.
+
+Per-class IoU (fine-tuned model, per image):
 
 | Class | IoU |
 |---|---|
-| Background | 0.7619 |
-| Direct (ego lane) | 0.5372 |
-| Alternative (adjacent lane) | 0.9568 |
+| Direct (ego lane) | 0.7619 |
+| Alternative (adjacent lane) | 0.5372 |
+| Background | 0.9568 |
+
+> **Correction (October 2026):** an earlier version of this README listed the per-class IoUs under the wrong class names. The evaluation script named mask values 0, 1, 2 as background, direct, alternative; they are direct, alternative, background, as `pipeline.py` and `definitive_class_check.py` use them. The same mix-up made the baseline score Cityscapes "road" as the adjacent lane, so its earlier 0.0427 was not a meaningful baseline. The fine-tuned model's numbers did not change, only their labels.
 
 Per-condition breakdown (fine-tuned model):
 

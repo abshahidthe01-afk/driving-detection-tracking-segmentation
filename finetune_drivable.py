@@ -11,7 +11,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 DATA_ROOT = "bdd100k_drivable_subset"
-NUM_CLASSES = 3  # background, direct, alternative
+NUM_CLASSES = 3  # mask values: 0 = direct (ego lane), 1 = alternative (adjacent lane), 2 = background
 INPUT_HEIGHT, INPUT_WIDTH = 320, 640  # matches our chosen inference resolution
 BATCH_SIZE = 4  # kept small given 4GB VRAM
 NUM_EPOCHS = 10
@@ -82,11 +82,11 @@ model.segmentation_head = nn.Sequential(
 model = model.to(device)
 
 # Class-weighted loss to address the severe imbalance we measured directly:
-# background=12.28%, direct=4.95%, alternative=82.77% of training pixels.
-# Weights computed via inverse frequency (see compute_class_weights.py) -- this
-# corrects our earlier flawed weighting, which left the dominant "alternative"
-# class at full weight and inadvertently let the model learn a majority-class
-# shortcut (confirmed via meaningless-input testing, see PROJECT_LOG).
+# direct=12.28%, alternative=4.95%, background=82.77% of training pixels
+# (mask values 0, 1, 2; archive/compute_class_weights.py prints them under the
+# names background/direct/alternative, which is the wrong order -- the numbers
+# themselves are per mask value and correct).
+# Weights computed via inverse frequency, in mask-value order [direct, alternative, background].
 class_weights = torch.tensor([0.8265, 2.0509, 0.1226]).to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)

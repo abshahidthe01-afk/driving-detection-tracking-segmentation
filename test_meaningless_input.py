@@ -50,5 +50,6 @@ rng = np.random.RandomState(0)
 noise = rng.randint(0, 255, (720, 1280, 3), dtype=np.uint8)
 predict_and_report(noise, "Random noise image")
 
-print("\nIf the model confidently predicts mostly class 2 even on meaningless input,")
-print("that indicates a learned class-imbalance bias/shortcut rather than genuine scene understanding.")
+print("\nClass 2 is background (mask values: 0 = direct, 1 = alternative, 2 = background).")
+print("Mostly class 2 on content-free input is the expected answer: there is no road in it.")
+print("A shortcut would show as predicting a lane class (0 or 1) on such input.")
