@@ -103,6 +103,20 @@ What these numbers show:
 - **Small objects are the weak spot:** AP 0.036 on small objects against 0.486 on large ones (COCO size bins). Traffic lights, mostly small, score 0.062.
 - **Night halves detection accuracy:** mAP 0.145 at night against 0.287 in daytime. The segmentation model, fine-tuned with night images, shows no such drop.
 
+**Does a higher input resolution help?** The same evaluation at `--imgsz 1280` (the images' native width):
+
+| | imgsz 640 | imgsz 1280 |
+|---|---|---|
+| mAP / mAP50 | 0.202 / 0.348 | 0.191 / 0.352 |
+| Small / medium / large objects AP | 0.036 / 0.187 / 0.486 | 0.080 / 0.241 / 0.361 |
+| Traffic light AP50 | 0.185 | 0.344 |
+| Pedestrian AP50 | 0.458 | 0.554 |
+| Night mAP | 0.145 | 0.122 |
+
+Small objects and traffic lights roughly double, but large objects lose a quarter of their AP and the overall mAP stays flat. The likely reason is that the COCO weights were trained at 640, so at 1280 large objects appear at sizes the model rarely saw. Resolution alone does not fix the detector; it needs training on BDD100K. The pipeline keeps 640, which also gives the detector about four times fewer pixels to process.
+
+To look at the results frame by frame, `visualize_detection.py` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green) and missed (red), the signs and riders it cannot detect (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25.
+
 **Speed:** ~13–14 FPS combined pipeline on the GTX 1650, with segmentation running every 3rd frame. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
 
 ## Known limitations
@@ -119,6 +133,7 @@ pipeline.py                  # Main inference pipeline (detection + tracking + s
 finetune_drivable.py         # Fine-tuning script for the segmentation model
 evaluate_test_set.py         # Segmentation evaluation on the held-out test set (mIoU, per-condition breakdown)
 evaluate_detection.py        # Detection evaluation on the same test set (COCO mAP, per class, day/night)
+visualize_detection.py       # Review video of the detection results (found / missed / false alarms)
 export_test_metadata.py      # Generates test/metadata.json used by evaluate_test_set.py
 test_meaningless_input.py    # Diagnostic: detects majority-class shortcut learning
 definitive_class_check.py    # Verifies the drivable-area label mapping (polygon-to-pixel)
