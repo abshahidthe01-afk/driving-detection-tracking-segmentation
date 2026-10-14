@@ -1,3 +1,14 @@
+"""
+Run detection + tracking + drivable-area segmentation on a driving video.
+
+Usage:  python pipeline.py [VIDEO] [--output pipeline_output.mp4]
+VIDEO defaults to driving_night_rain_720p.mp4 in this folder. Any forward-facing,
+landscape dashcam clip works (see Known limitations in the README).
+"""
+import argparse
+import glob
+import sys
+
 import cv2
 import torch
 import torch.nn as nn
@@ -6,6 +17,24 @@ import time
 import albumentations as A
 import segmentation_models_pytorch as smp
 from ultralytics import YOLO
+
+parser = argparse.ArgumentParser(description="Detection + tracking + drivable-area segmentation on a video.")
+parser.add_argument("source", nargs="?", default="driving_night_rain_720p.mp4", help="input video")
+parser.add_argument("--output", default="pipeline_output.mp4", help="output video (default pipeline_output.mp4)")
+args = parser.parse_args()
+
+# Check the input before loading any model: OpenCV opens a missing file without an error
+# and simply returns no frames.
+cap = cv2.VideoCapture(args.source)
+if not cap.isOpened() or int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) <= 0:
+    videos = sorted(glob.glob("*.mp4") + glob.glob("*.avi") + glob.glob("*.mov") + glob.glob("*.mkv"))
+    print(f"Cannot read video '{args.source}' (missing, or in a format OpenCV cannot open).")
+    if videos:
+        print("Videos in this folder:\n  " + "\n  ".join(videos))
+        print(f"Run for example:  python pipeline.py \"{videos[0]}\"")
+    else:
+        print("No videos in this folder: put a dashcam clip here and pass its name.")
+    sys.exit(1)
 
 # ---------- Setup ----------
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,14 +71,12 @@ last_direct_mask_resized = None
 last_alternative_mask_resized = None
 
 # ---------- Video setup ----------
-source_path = "driving_night_rain_720p.mp4"
-cap = cv2.VideoCapture(source_path)
-fps = cap.get(cv2.CAP_PROP_FPS)
+fps = cap.get(cv2.CAP_PROP_FPS) or 30.0  # some files report no frame rate
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-output_path = "pipeline_output.mp4"
+output_path = args.output
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
@@ -119,6 +146,8 @@ while True:
 
 cap.release()
 writer.release()
+if frame_idx == 0:
+    sys.exit(f"No frames could be read from '{args.source}'; nothing was written.")
 print(f"Done. Output saved to {output_path}")
 
 print("\n--- Timing breakdown (average ms/frame) ---")

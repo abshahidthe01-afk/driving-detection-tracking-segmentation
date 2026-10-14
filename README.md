@@ -151,4 +151,4 @@ Model checkpoints (`.pth`), video outputs (`.mp4`), and the BDD100K dataset subs
 4. Run `finetune_drivable.py` to train, or supply your own `drivable_finetuned.pth`
 5. Run `evaluate_test_set.py` to reproduce the segmentation results above
 6. Run `evaluate_detection.py` (needs `pycocotools`) to reproduce the detection results
-7. Run `pipeline.py` on a video file to generate the combined annotated output
+7. Run `python pipeline.py your_clip.mp4` to generate the combined annotated output (`pipeline_output.mp4`; change it with `--output`)
