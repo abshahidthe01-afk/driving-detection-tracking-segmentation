@@ -4,14 +4,15 @@ Make a video of the detector's results on the 614 test images, to look at them b
 Each frame is one test image:
   green   labelled object the detector found (same class, box overlap IoU >= 0.5)
   red     labelled object it missed
-  orange  labelled traffic sign or rider: classes the COCO-trained detector cannot output
+  orange  labelled object of a class the model cannot output (traffic sign and rider
+          for the stock COCO model; none after fine-tuning on BDD100K)
   blue    detection with no matching label (false alarm)
 
 Detections are shown above the pipeline's confidence threshold (0.25), so the video
 matches what pipeline.py draws. (The mAP in evaluate_detection.py uses all confidences.)
 
-Run:    python visualize_detection.py [--only night] [--worst] [--limit 100] [--fps 1]
-Writes: detection_review.mp4
+Run:    python visualize_detection.py [--model yolov8s.pt] [--only night] [--worst] [--limit 100]
+                                      [--fps 1] [--output detection_review.mp4]
 """
 
 import argparse
@@ -20,9 +21,8 @@ import os
 import cv2
 import numpy as np
 
-from evaluate_detection import COCO_TO_BDD, NOT_IN_COCO, TEST_IMG_DIR, match_by_content
+from evaluate_detection import BDD_CLASSES, TEST_IMG_DIR, bdd_mapping, match_by_content, normalize_label
 
-OUTPUT_PATH = "detection_review.mp4"
 CONF = 0.25          # Ultralytics' default, as used by pipeline.py
 IOU_MATCH = 0.5
 BANNER, LEGEND = 64, 40   # pixel heights of the text bars above and below the image
@@ -106,11 +106,11 @@ def draw_frame(image, gt, uncoverable, preds, found, matched, title):
     n_found = sum(found)
     text(frame, title, (12, 24), WHITE, 0.6)
     stats = (f"labelled {len(gt) + len(uncoverable)}   found {n_found}   missed {len(gt) - n_found}   "
-             f"no COCO class {len(uncoverable)}   false alarms {matched.count(False)}")
+             f"class not in model {len(uncoverable)}   false alarms {matched.count(False)}")
     text(frame, stats, (12, 52), WHITE, 0.55)
 
     x, y = 12, BANNER + h + 26
-    for colour, name in [(GREEN, "found"), (RED, "missed"), (ORANGE, "sign / rider (no COCO class)"),
+    for colour, name in [(GREEN, "found"), (RED, "missed"), (ORANGE, "class the model cannot output"),
                          (BLUE, "false alarm")]:
         cv2.rectangle(frame, (x, y - 12), (x + 18, y + 2), colour, -1)
         text(frame, name, (x + 26, y), WHITE, 0.5)
@@ -126,6 +126,7 @@ def main():
     parser.add_argument("--worst", action="store_true", help="order frames by most missed objects first")
     parser.add_argument("--limit", type=int, help="at most this many frames")
     parser.add_argument("--fps", type=float, default=1.0, help="frames per second (default 1: one image per second)")
+    parser.add_argument("--output", default="detection_review.mp4")
     args = parser.parse_args()
 
     import torch
@@ -137,21 +138,19 @@ def main():
     print("Loading BDD100K (local Hugging Face cache)...")
     dataset = fouh.load_from_hub("dgural/bdd100k")
     filepaths = dataset.values("filepath")
-    labels = dataset.values("detections.detections.label")
+    labels = [[normalize_label(x) for x in (ls or [])] for ls in dataset.values("detections.detections.label")]
     boxes = dataset.values("detections.detections.bounding_box")
     timeofday = dataset.values("timeofday.label")
     weather = dataset.values("weather.label")
     matches = match_by_content(test_paths, filepaths)
     print(f"Matched {len(matches)}/{len(test_paths)} test images")
 
-    person = "pedestrian" if any("pedestrian" in (labels[i] or []) for i in matches.values()) else "person"
-    coco_to_bdd = dict(COCO_TO_BDD, person=person)
-    detectable = set(coco_to_bdd.values())
-
     selected = [(f, p) for f, p in zip(test_files, test_paths)
                 if p in matches and (args.only is None or timeofday[matches[p]] == args.only)]
     device = 0 if torch.cuda.is_available() else "cpu"
     model = YOLO(args.model)
+    mapping = bdd_mapping(model.names)
+    detectable = set(mapping.values())
 
     # Pass 1: detections and matching for every selected image (small, kept in memory)
     items = []
@@ -160,17 +159,17 @@ def main():
         i = matches[path]
         h, w = cv2.imread(path).shape[:2]
         gt, uncoverable = [], []
-        for label, (x, y, bw, bh) in zip(labels[i] or [], boxes[i] or []):
+        for label, (x, y, bw, bh) in zip(labels[i], boxes[i] or []):
             b = (x * w, y * h, (x + bw) * w, (y + bh) * h)
             if label in detectable:
                 gt.append((label, b))
-            elif label in NOT_IN_COCO:
+            elif label in BDD_CLASSES:
                 uncoverable.append((label, b))
         result = model.predict(path, imgsz=args.imgsz, conf=CONF, device=device, verbose=False)[0]
         preds = []
         for b, conf, cls in zip(result.boxes.xyxy.cpu().numpy(), result.boxes.conf.cpu().numpy(),
                                 result.boxes.cls.cpu().numpy()):
-            label = coco_to_bdd.get(model.names[int(cls)])
+            label = mapping.get(int(cls))
             if label is not None:
                 preds.append((label, tuple(float(v) for v in b), float(conf)))
         found, matched = match(gt, preds)
@@ -190,7 +189,7 @@ def main():
                            f"{fname}   {tod}, {wea}")
         if writer is None:
             size = (frame.shape[1], frame.shape[0])
-            writer = cv2.VideoWriter(OUTPUT_PATH, cv2.VideoWriter_fourcc(*"mp4v"), args.fps, size)
+            writer = cv2.VideoWriter(args.output, cv2.VideoWriter_fourcc(*"mp4v"), args.fps, size)
         if (frame.shape[1], frame.shape[0]) != size:
             frame = cv2.resize(frame, size)
         writer.write(frame)
@@ -201,9 +200,9 @@ def main():
     found_total = sum(sum(it[5]) for it in items)
     print(f"\nAt confidence {CONF}: found {found_total}/{total} labelled objects of classes it can detect "
           f"({100 * found_total / max(total, 1):.1f}%), "
-          f"{sum(len(it[3]) for it in items)} signs/riders it cannot detect, "
+          f"{sum(len(it[3]) for it in items)} of classes it cannot output, "
           f"{sum(it[6].count(False) for it in items)} false alarms")
-    print(f"Wrote {OUTPUT_PATH}: {len(items)} frames at {args.fps:g} per second")
+    print(f"Wrote {args.output}: {len(items)} frames at {args.fps:g} per second")
 
 
 if __name__ == "__main__":

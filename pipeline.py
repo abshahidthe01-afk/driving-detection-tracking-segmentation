@@ -1,7 +1,7 @@
 """
 Run detection + tracking + drivable-area segmentation on a driving video.
 
-Usage:  python pipeline.py [VIDEO] [--output pipeline_output.mp4]
+Usage:  python pipeline.py [VIDEO] [--output pipeline_output.mp4] [--detector yolov8s.pt]
 VIDEO defaults to driving_night_rain_720p.mp4 in this folder. Any forward-facing,
 landscape dashcam clip works (see Known limitations in the README).
 """
@@ -21,6 +21,8 @@ from ultralytics import YOLO
 parser = argparse.ArgumentParser(description="Detection + tracking + drivable-area segmentation on a video.")
 parser.add_argument("source", nargs="?", default="driving_night_rain_720p.mp4", help="input video")
 parser.add_argument("--output", default="pipeline_output.mp4", help="output video (default pipeline_output.mp4)")
+parser.add_argument("--detector", default="yolov8s.pt",
+                    help="detector weights: yolov8s.pt (COCO) or a fine-tuned best.pt from train_detector.py")
 args = parser.parse_args()
 
 # Check the input before loading any model: OpenCV opens a missing file without an error
@@ -41,7 +43,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 # Detection + tracking model
-yolo_model = YOLO("yolov8s.pt")
+yolo_model = YOLO(args.detector)
 
 # Segmentation model -- fine-tuned drivable-area model (3 classes: direct/alternative/background),
 # fine-tuned from the original Cityscapes checkpoint on BDD100K night/rain + daytime data.

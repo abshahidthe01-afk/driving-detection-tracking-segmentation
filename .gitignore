@@ -7,3 +7,4 @@ __pycache__/
 *.mp4
 bdd100k_drivable_subset/
 runs/
+bdd100k_det/

@@ -117,6 +117,16 @@ Small objects and traffic lights roughly double, but large objects lose a quarte
 
 To look at the results frame by frame, `visualize_detection.py` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green) and missed (red), the signs and riders it cannot detect (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25.
 
+### Fine-tuning the detector on BDD100K (in progress)
+
+The detector is fine-tuned from its COCO weights on BDD100K's 10 detection classes, which adds traffic sign and rider:
+
+- **Data** (`prepare_detection_data.py`): the 10,000-image BDD100K subset minus every image whose file content equals one of the 614 test images (matched by MD5, so duplicates are caught too), split at random with a fixed seed into about 8,450 train and 940 val images. Val picks the best epoch and stops training early; the test images are used only for the final comparison.
+- **Training** (`train_detector.py`): YOLOv8s, 640 px, up to 30 epochs with early stopping after 8 epochs without val improvement. Batch 4 on the GTX 1650, where Ultralytics trains in full precision; gradients are accumulated to an effective batch of 64. Runs resume from the last finished epoch.
+- **Comparison** (`evaluate_detection.py --model .../best.pt`): the same 614 test images, reported over all 10 classes and over the 8 classes the stock model also covers, for a like-for-like before/after.
+
+Results will be added here.
+
 **Speed:** ~13–14 FPS combined pipeline on the GTX 1650, with segmentation running every 3rd frame. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
 
 ## Known limitations
@@ -134,6 +144,8 @@ finetune_drivable.py         # Fine-tuning script for the segmentation model
 evaluate_test_set.py         # Segmentation evaluation on the held-out test set (mIoU, per-condition breakdown)
 evaluate_detection.py        # Detection evaluation on the same test set (COCO mAP, per class, day/night)
 visualize_detection.py       # Review video of the detection results (found / missed / false alarms)
+prepare_detection_data.py    # YOLO-format BDD100K detection data without the test images
+train_detector.py            # Fine-tunes YOLOv8 on that data (resumable)
 export_test_metadata.py      # Generates test/metadata.json used by evaluate_test_set.py
 test_meaningless_input.py    # Diagnostic: detects majority-class shortcut learning
 definitive_class_check.py    # Verifies the drivable-area label mapping (polygon-to-pixel)
@@ -151,4 +163,5 @@ Model checkpoints (`.pth`), video outputs (`.mp4`), and the BDD100K dataset subs
 4. Run `finetune_drivable.py` to train, or supply your own `drivable_finetuned.pth`
 5. Run `evaluate_test_set.py` to reproduce the segmentation results above
 6. Run `evaluate_detection.py` (needs `pycocotools`) to reproduce the detection results
-7. Run `python pipeline.py your_clip.mp4` to generate the combined annotated output (`pipeline_output.mp4`; change it with `--output`)
+7. To fine-tune the detector: `prepare_detection_data.py`, then `train_detector.py`, then `evaluate_detection.py --model runs/bdd_det/yolov8s_bdd/weights/best.pt`
+8. Run `python pipeline.py your_clip.mp4` to generate the combined annotated output (`pipeline_output.mp4`; change it with `--output`, use the fine-tuned detector with `--detector`)

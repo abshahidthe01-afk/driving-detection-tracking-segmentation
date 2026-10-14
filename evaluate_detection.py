@@ -2,10 +2,12 @@
 Evaluate YOLOv8 object detection on the same 614 held-out test images as the
 segmentation model, against BDD100K's own box labels.
 
-The detector uses its stock COCO weights (not fine-tuned on BDD100K), so its classes
-are mapped to BDD100K's. COCO has no "traffic sign" and no "rider" class, so those two
-BDD100K classes cannot be detected at all; they are left out of the mAP and reported
-separately as the share of labelled objects the detector cannot find.
+Works with the stock COCO weights and with a model fine-tuned on BDD100K
+(train_detector.py). The stock model's classes are mapped to BDD100K's; COCO has no
+"traffic sign" and no "rider" class, so it cannot detect those two at all: they are left
+out of its mAP and reported as the share of labelled objects it cannot find. For a fair
+before/after comparison the script also reports the mAP over the 8 classes both models
+share.
 
 The test images are found in the BDD100K dataset by file content (MD5), so the result
 does not depend on reproducing the shuffle that made the split.
@@ -14,7 +16,7 @@ Scoring uses pycocotools, the standard COCO evaluation: mAP over IoU 0.50:0.95, 
 IoU 0.50, per class, and split by time of day.
 
 Needs:  pip install pycocotools
-Run:    python evaluate_detection.py [--model yolov8s.pt] [--imgsz 640]
+Run:    python evaluate_detection.py [--model yolov8s.pt] [--imgsz 640] [--results detection_results.json]
 """
 
 import argparse
@@ -31,22 +33,39 @@ from PIL import Image
 DATA_ROOT = "bdd100k_drivable_subset"
 TEST_IMG_DIR = os.path.join(DATA_ROOT, "test", "images")
 METADATA_PATH = os.path.join(DATA_ROOT, "test", "metadata.json")
-RESULTS_PATH = "detection_results.json"
 
-# COCO class (as YOLOv8 names it) -> BDD100K class. "person" gets whatever this dataset
-# calls pedestrians ("pedestrian" or "person"), decided at run time.
-COCO_TO_BDD = {
-    "person": None,
-    "bicycle": "bicycle",
-    "car": "car",
-    "motorcycle": "motorcycle",
-    "bus": "bus",
-    "train": "train",
-    "truck": "truck",
-    "traffic light": "traffic light",
-}
-# BDD100K classes with no COCO counterpart: the stock detector cannot find them.
-NOT_IN_COCO = ["traffic sign", "rider"]
+# The 10 standard BDD100K detection classes
+BDD_CLASSES = ["pedestrian", "rider", "car", "truck", "bus", "train",
+               "motorcycle", "bicycle", "traffic light", "traffic sign"]
+# The 8 of them the stock COCO model can output (COCO's "person" counts as pedestrian)
+COCO_SHARED = [c for c in BDD_CLASSES if c not in ("rider", "traffic sign")]
+
+
+def normalize_label(label):
+    """BDD100K versions and COCO call pedestrians 'person'; use 'pedestrian' throughout."""
+    return "pedestrian" if label == "person" else label
+
+
+def bdd_mapping(model_names):
+    """
+    Return {model class index: BDD100K class} for the model's classes that are BDD100K
+    classes. For the stock COCO model that is the 8 shared classes (its other classes are
+    ignored); for a model fine-tuned on BDD100K it is all 10.
+    """
+    mapping = {}
+    for idx, name in model_names.items():
+        name = normalize_label(name)
+        if name in BDD_CLASSES:
+            mapping[int(idx)] = name
+    return mapping
+
+
+def shared_means(result):
+    """mAP and mAP50 over the COCO-shared classes present in the images (for before/after)."""
+    rows = [r for name, r in result["per_class"].items() if name in COCO_SHARED]
+    if not rows:
+        return 0.0, 0.0
+    return float(np.mean([r["AP"] for r in rows])), float(np.mean([r["AP50"] for r in rows]))
 
 
 def file_md5(path):
@@ -159,11 +178,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--model", default="yolov8s.pt", help="YOLOv8 weights (default: the pipeline's yolov8s.pt)")
     parser.add_argument("--imgsz", type=int, default=640, help="inference size (default 640, as in pipeline.py)")
+    parser.add_argument("--results", default="detection_results.json", help="where to save the numbers")
     args = parser.parse_args()
 
     import torch
     import fiftyone.utils.huggingface as fouh
     from ultralytics import YOLO
+
+    model = YOLO(args.model)
+    mapping = bdd_mapping(model.names)
+    class_names = sorted(set(mapping.values()))
+    cannot_output = [c for c in BDD_CLASSES if c not in class_names]
 
     # --- Find the test images in BDD100K by content ---
     test_files = sorted(os.listdir(TEST_IMG_DIR))
@@ -173,7 +198,7 @@ def main():
     print("Loading BDD100K (local Hugging Face cache)...")
     dataset = fouh.load_from_hub("dgural/bdd100k")
     filepaths = dataset.values("filepath")
-    labels = dataset.values("detections.detections.label")
+    labels = [[normalize_label(x) for x in (ls or [])] for ls in dataset.values("detections.detections.label")]
     boxes = dataset.values("detections.detections.bounding_box")
     timeofday = dataset.values("timeofday.label")
     weather = dataset.values("weather.label")
@@ -198,19 +223,18 @@ def main():
     # --- Ground truth ---
     all_labels = Counter()
     for path, i in matches.items():
-        all_labels.update(labels[i] or [])
-    person_label = "pedestrian" if all_labels["pedestrian"] >= all_labels["person"] else "person"
-    coco_to_bdd = dict(COCO_TO_BDD, person=person_label)
-    class_names = sorted(set(coco_to_bdd.values()))
+        all_labels.update(labels[i])
 
     print("\nLabelled objects in the test images:")
     for name, count in all_labels.most_common():
-        note = "" if name in class_names else ("  <- no COCO class" if name in NOT_IN_COCO else "  <- not evaluated")
+        note = ("" if name in class_names
+                else "  <- the model has no such class" if name in cannot_output else "  <- not evaluated")
         print(f"  {name:15} {count:6}{note}")
     total = sum(all_labels.values())
-    missing = sum(all_labels[n] for n in NOT_IN_COCO)
-    print(f"  {missing}/{total} labelled objects ({100 * missing / max(total, 1):.1f}%) are classes "
-          f"the COCO-trained detector cannot output ({', '.join(NOT_IN_COCO)})")
+    missing = sum(all_labels[n] for n in cannot_output)
+    if cannot_output:
+        print(f"  {missing}/{total} labelled objects ({100 * missing / max(total, 1):.1f}%) are classes "
+              f"this model cannot output ({', '.join(cannot_output)})")
 
     images = []
     image_ids = {}
@@ -220,7 +244,7 @@ def main():
         i = matches[path]
         width, height = Image.open(path).size
         images.append({"id": image_id, "file_name": fname, "width": width, "height": height,
-                       "boxes": list(zip(labels[i] or [], boxes[i] or []))})
+                       "boxes": list(zip(labels[i], boxes[i] or []))})
         image_ids[path] = image_id
     gt_dict = build_coco_gt(images, class_names)
     cat_id = {c["name"]: c["id"] for c in gt_dict["categories"]}
@@ -228,7 +252,6 @@ def main():
     # --- Predictions ---
     device = 0 if torch.cuda.is_available() else "cpu"
     print(f"\nRunning {args.model} at imgsz={args.imgsz} on {'GPU' if device == 0 else 'CPU'}...")
-    model = YOLO(args.model)
     predictions = []
     for n, (path, image_id) in enumerate(image_ids.items(), start=1):
         # conf=0.001 and iou=0.7 are Ultralytics' own settings for computing mAP
@@ -237,7 +260,7 @@ def main():
         for (x1, y1, x2, y2), score, cls in zip(result.boxes.xyxy.cpu().numpy(),
                                                 result.boxes.conf.cpu().numpy(),
                                                 result.boxes.cls.cpu().numpy()):
-            bdd = coco_to_bdd.get(model.names[int(cls)])
+            bdd = mapping.get(int(cls))
             if bdd is None:
                 continue
             predictions.append({"image_id": image_id, "category_id": cat_id[bdd],
@@ -247,28 +270,37 @@ def main():
             print(f"  {n}/{len(image_ids)}")
 
     # --- Scores ---
+    covers_more = set(class_names) != set(COCO_SHARED)
     print("\nCOCO evaluation, all test images:")
     overall = coco_evaluate(gt_dict, predictions, verbose=True)
+    overall["mAP_shared"], overall["mAP50_shared"] = shared_means(overall)
     print(f"{'class':15}{'GT boxes':>10}{'AP50':>8}{'AP':>8}")
     for name, r in sorted(overall["per_class"].items(), key=lambda kv: -kv[1]["gt_boxes"]):
         print(f"{name:15}{r['gt_boxes']:10}{r['AP50']:8.3f}{r['AP']:8.3f}")
     print(f"{'mean':15}{'':10}{overall['mAP50']:8.3f}{overall['mAP']:8.3f}")
+    if covers_more:
+        print(f"{'mean, 8 shared':15}{'':10}{overall['mAP50_shared']:8.3f}{overall['mAP_shared']:8.3f}"
+              f"   <- compare this row with the stock COCO model")
 
     by_time = {}
     for period in ["daytime", "night", "dawn/dusk"]:
         ids = [image_ids[p] for p in image_ids if timeofday[matches[p]] == period]
         if ids:
             r = coco_evaluate(gt_dict, predictions, ids)
-            by_time[period] = {"images": len(ids), "mAP": r["mAP"], "mAP50": r["mAP50"]}
+            shared, shared50 = shared_means(r)
+            by_time[period] = {"images": len(ids), "mAP": r["mAP"], "mAP50": r["mAP50"],
+                               "mAP_shared": shared, "mAP50_shared": shared50}
     print("\nBy time of day:")
     for period, r in by_time.items():
-        print(f"  {period:10} n={r['images']:4}  mAP50 {r['mAP50']:.3f}  mAP {r['mAP']:.3f}")
+        extra = f"   8 shared classes: mAP50 {r['mAP50_shared']:.3f}  mAP {r['mAP_shared']:.3f}" if covers_more else ""
+        print(f"  {period:10} n={r['images']:4}  mAP50 {r['mAP50']:.3f}  mAP {r['mAP']:.3f}{extra}")
 
-    with open(RESULTS_PATH, "w") as f:
+    with open(args.results, "w") as f:
         json.dump({"model": args.model, "imgsz": args.imgsz, "images": len(image_ids),
-                   "labelled_objects": dict(all_labels), "not_in_coco": NOT_IN_COCO,
+                   "classes": class_names, "cannot_output": cannot_output,
+                   "labelled_objects": dict(all_labels),
                    "overall": overall, "by_timeofday": by_time}, f, indent=2)
-    print(f"\nSaved {RESULTS_PATH}")
+    print(f"\nSaved {args.results}")
 
 
 if __name__ == "__main__":
