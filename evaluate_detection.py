@@ -39,6 +39,10 @@ BDD_CLASSES = ["pedestrian", "rider", "car", "truck", "bus", "train",
                "motorcycle", "bicycle", "traffic light", "traffic sign"]
 # The 8 of them the stock COCO model can output (COCO's "person" counts as pedestrian)
 COCO_SHARED = [c for c in BDD_CLASSES if c not in ("rider", "traffic sign")]
+# Classes used to compare models: the shared ones without "train", which has a single box
+# in the 614 test images, so its AP is all-or-nothing (0 or about 1) and one object moves
+# an 8-class mean by up to 0.12. The full means and per-class APs are reported as well.
+COMPARED = [c for c in COCO_SHARED if c != "train"]
 
 
 def normalize_label(label):
@@ -60,9 +64,9 @@ def bdd_mapping(model_names):
     return mapping
 
 
-def shared_means(result):
-    """mAP and mAP50 over the COCO-shared classes present in the images (for before/after)."""
-    rows = [r for name, r in result["per_class"].items() if name in COCO_SHARED]
+def compared_means(result):
+    """mAP and mAP50 over the COMPARED classes present in the images (for before/after)."""
+    rows = [r for name, r in result["per_class"].items() if name in COMPARED]
     if not rows:
         return 0.0, 0.0
     return float(np.mean([r["AP"] for r in rows])), float(np.mean([r["AP50"] for r in rows]))
@@ -270,30 +274,40 @@ def main():
             print(f"  {n}/{len(image_ids)}")
 
     # --- Scores ---
-    covers_more = set(class_names) != set(COCO_SHARED)
     print("\nCOCO evaluation, all test images:")
     overall = coco_evaluate(gt_dict, predictions, verbose=True)
-    overall["mAP_shared"], overall["mAP50_shared"] = shared_means(overall)
+    overall["mAP_compared"], overall["mAP50_compared"] = compared_means(overall)
     print(f"{'class':15}{'GT boxes':>10}{'AP50':>8}{'AP':>8}")
     for name, r in sorted(overall["per_class"].items(), key=lambda kv: -kv[1]["gt_boxes"]):
         print(f"{name:15}{r['gt_boxes']:10}{r['AP50']:8.3f}{r['AP']:8.3f}")
     print(f"{'mean':15}{'':10}{overall['mAP50']:8.3f}{overall['mAP']:8.3f}")
-    if covers_more:
-        print(f"{'mean, 8 shared':15}{'':10}{overall['mAP50_shared']:8.3f}{overall['mAP_shared']:8.3f}"
-              f"   <- compare this row with the stock COCO model")
+    print(f"{'mean, compared':15}{'':10}{overall['mAP50_compared']:8.3f}{overall['mAP_compared']:8.3f}"
+          f"   <- compare this row between models ({len(COMPARED)} classes: shared, without train)")
 
     by_time = {}
     for period in ["daytime", "night", "dawn/dusk"]:
         ids = [image_ids[p] for p in image_ids if timeofday[matches[p]] == period]
         if ids:
             r = coco_evaluate(gt_dict, predictions, ids)
-            shared, shared50 = shared_means(r)
+            compared, compared50 = compared_means(r)
             by_time[period] = {"images": len(ids), "mAP": r["mAP"], "mAP50": r["mAP50"],
-                               "mAP_shared": shared, "mAP50_shared": shared50}
+                               "mAP_compared": compared, "mAP50_compared": compared50,
+                               "per_class": r["per_class"]}
     print("\nBy time of day:")
     for period, r in by_time.items():
-        extra = f"   8 shared classes: mAP50 {r['mAP50_shared']:.3f}  mAP {r['mAP_shared']:.3f}" if covers_more else ""
+        extra = f"   compared: mAP50 {r['mAP50_compared']:.3f}  mAP {r['mAP_compared']:.3f}"
         print(f"  {period:10} n={r['images']:4}  mAP50 {r['mAP50']:.3f}  mAP {r['mAP']:.3f}{extra}")
+
+    print("\nAP by class and time of day (labelled boxes in brackets):")
+    periods = list(by_time)
+    print(f"  {'class':15}" + "".join(f"{p:>18}" for p in periods))
+    for name in BDD_CLASSES:
+        cells = []
+        for p in periods:
+            r = by_time[p]["per_class"].get(name)
+            cells.append(f"{r['AP']:.3f} ({r['gt_boxes']})" if r else "-")
+        if any(c != "-" for c in cells):
+            print(f"  {name:15}" + "".join(f"{c:>18}" for c in cells))
 
     with open(args.results, "w") as f:
         json.dump({"model": args.model, "imgsz": args.imgsz, "images": len(image_ids),
