@@ -1,12 +1,15 @@
 """
 Run detection + tracking + drivable-area segmentation on a driving video.
 
-Usage:  python pipeline.py [VIDEO] [--output pipeline_output.mp4] [--detector yolov8s.pt]
+Usage:  python pipeline.py [VIDEO] [--output pipeline_output.mp4] [--detector WEIGHTS]
+The detector defaults to the BDD100K fine-tuned weights from train_detector.py if they exist,
+otherwise to the stock COCO yolov8s.pt.
 VIDEO defaults to driving_night_rain_720p.mp4 in this folder. Any forward-facing,
 landscape dashcam clip works (see Known limitations in the README).
 """
 import argparse
 import glob
+import os
 import sys
 
 import cv2
@@ -21,8 +24,9 @@ from ultralytics import YOLO
 parser = argparse.ArgumentParser(description="Detection + tracking + drivable-area segmentation on a video.")
 parser.add_argument("source", nargs="?", default="driving_night_rain_720p.mp4", help="input video")
 parser.add_argument("--output", default="pipeline_output.mp4", help="output video (default pipeline_output.mp4)")
-parser.add_argument("--detector", default="yolov8s.pt",
-                    help="detector weights: yolov8s.pt (COCO) or a fine-tuned best.pt from train_detector.py")
+FINETUNED = "runs/bdd_det/yolov8s_bdd/weights/best.pt"
+parser.add_argument("--detector", default=None,
+                    help=f"detector weights (default: {FINETUNED} if it exists, else yolov8s.pt, the COCO model)")
 args = parser.parse_args()
 
 # Check the input before loading any model: OpenCV opens a missing file without an error
@@ -43,7 +47,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
 # Detection + tracking model
-yolo_model = YOLO(args.detector)
+detector = args.detector or (FINETUNED if os.path.exists(FINETUNED) else "yolov8s.pt")
+print(f"Detector: {detector}")
+yolo_model = YOLO(detector)
 
 # Segmentation model -- fine-tuned drivable-area model (3 classes: direct/alternative/background),
 # fine-tuned from the original Cityscapes checkpoint on BDD100K night/rain + daytime data.

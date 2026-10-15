@@ -3,7 +3,7 @@
 A computer vision pipeline for driving video that combines **object detection**, **multi-object tracking**, and **drivable-area segmentation** into a single annotated output — built and benchmarked to run on consumer laptop hardware.
 
 Given a dashcam-style driving video, the pipeline:
-1. **Detects** objects (vehicles, pedestrians, etc.) with YOLOv8
+1. **Detects** objects (vehicles, pedestrians, riders, traffic lights and signs) with YOLOv8s fine-tuned on BDD100K
 2. **Tracks** them across frames with persistent IDs using ByteTrack
 3. **Segments** the drivable road area with a fine-tuned SegFormer-B0 model, distinguishing the ego lane (green) from adjacent lanes (blue)
 
@@ -18,7 +18,7 @@ Most public dashcam-style CV demos only do detection, or only do segmentation. T
 ```
 Input video
      │
-     ├─► YOLOv8s (object detection) ──► ByteTrack (persistent IDs)
+     ├─► YOLOv8s, fine-tuned (object detection) ──► ByteTrack (persistent IDs)
      │
      └─► SegFormer-B0, fine-tuned (drivable-area segmentation, run every 3rd frame)
      │
@@ -26,7 +26,7 @@ Input video
 Combined annotated output (boxes + track IDs + lane overlay)
 ```
 
-- **Detection & tracking:** YOLOv8s + ByteTrack (via Ultralytics). Runs every frame.
+- **Detection & tracking:** YOLOv8s fine-tuned on BDD100K's 10 detection classes ([results](#object-detection-stock-coco-model-vs-fine-tuned-on-bdd100k)) + ByteTrack (via Ultralytics). Runs every frame.
 - **Segmentation:** SegFormer-B0 (`segmentation-models-pytorch`, originally a Cityscapes-pretrained checkpoint), fine-tuned on BDD100K's 3-class drivable-area labels (background / direct lane / alternative lane). Input downscaled from the checkpoint's native 640×1280 to 320×640 for a ~9× speedup, with negligible quality loss (confirmed via a dedicated IoU comparison: 98.5% mean IoU agreement against full-resolution output). Runs every 3rd frame; the mask is reused on skipped frames to save compute.
 
 ## Hardware & environment
@@ -76,34 +76,60 @@ Per-condition breakdown (fine-tuned model). Here each image's IoU is averaged ov
 
 The weather and time-of-day labels behind this table were cross-checked against the dataset for all 614 images (by `evaluate_detection.py`).
 
-### Object detection (YOLOv8s, stock COCO weights)
+### Object detection: stock COCO model vs fine-tuned on BDD100K
 
-The detector runs with its COCO-pretrained weights; it is not fine-tuned on BDD100K. Its classes are mapped to BDD100K's and it is scored against BDD100K's own box labels with pycocotools (the standard COCO evaluation), at the pipeline's inference size of 640.
+Two YOLOv8s detectors, scored on the same 614 test images against BDD100K's own box labels with pycocotools (the standard COCO evaluation), at the pipeline's inference size of 640:
+- **Stock:** the COCO-pretrained weights, with COCO classes mapped to BDD100K's. COCO has no traffic sign or rider class.
+- **Fine-tuned:** the same model trained further on BDD100K's 10 detection classes (see [How the detector was fine-tuned](#how-the-detector-was-fine-tuned)). The pipeline now uses this one.
 
-| Class | Labelled boxes | AP50 | AP (IoU 0.50:0.95) |
+| Class | Labelled boxes | Stock AP50 / AP | Fine-tuned AP50 / AP |
 |---|---|---|---|
-| Car | 5,988 | 0.535 | 0.316 |
-| Traffic light | 1,751 | 0.185 | 0.062 |
-| Pedestrian | 685 | 0.458 | 0.222 |
-| Truck | 217 | 0.287 | 0.200 |
-| Bus | 92 | 0.315 | 0.255 |
-| Bicycle | 39 | 0.227 | 0.076 |
-| Motorcycle | 24 | 0.275 | 0.083 |
-| Train | 1 | 0.500 | 0.400 (a single object, not meaningful) |
-| **Mean** | | **0.348** | **0.202** |
+| Car | 5,988 | 0.535 / 0.316 | **0.742 / 0.452** |
+| Traffic sign | 2,180 | no such class | **0.590 / 0.311** |
+| Traffic light | 1,751 | 0.185 / 0.062 | **0.553 / 0.197** |
+| Pedestrian | 685 | 0.458 / 0.222 | **0.551 / 0.271** |
+| Truck | 217 | 0.287 / 0.200 | **0.506 / 0.368** |
+| Bus | 92 | 0.315 / 0.255 | **0.477 / 0.386** |
+| Rider | 44 | no such class | **0.229 / 0.113** |
+| Bicycle | 39 | 0.227 / 0.076 | **0.261 / 0.121** |
+| Motorcycle | 24 | 0.275 / 0.083 | **0.514 / 0.228** |
+| Train | 1 | 0.500 / 0.400 | 0.000 / 0.000 |
 
-| Time of day | Images | mAP50 | mAP |
-|---|---|---|---|
-| Daytime | 217 | 0.465 | 0.287 |
-| Night | 390 | 0.276 | 0.145 |
-| Dawn/dusk | 7 | 0.239 | 0.167 |
+AP is averaged over IoU 0.50:0.95; AP50 counts a box as found at IoU 0.5.
 
-What these numbers show:
-- **One in five labelled objects cannot be detected at all.** COCO has no class for traffic signs (2,180 boxes) or riders (44), so 2,224 of the 11,025 labelled objects (20.2%) are outside what the stock detector can output. They are left out of the mAP above, so the mAP overstates how much of the scene the detector covers.
-- **Small objects are the weak spot:** AP 0.036 on small objects against 0.486 on large ones (COCO size bins). Traffic lights, mostly small, score 0.062.
-- **Night halves detection accuracy:** mAP 0.145 at night against 0.287 in daytime. The segmentation model, fine-tuned with night images, shows no such drop.
+| | Stock | Fine-tuned |
+|---|---|---|
+| **mAP / mAP50, 7 compared classes** | 0.174 / 0.326 | **0.289 / 0.515** |
+| mAP, 7 compared classes, daytime (217 images) | 0.214 | **0.311** |
+| mAP, 7 compared classes, night (390 images) | 0.145 | **0.275** |
+| AP on small / medium / large objects | 0.036 / 0.187 / 0.486 | 0.084 / 0.320 / 0.554 |
+| mAP / mAP50 over all classes the model outputs | 0.202 / 0.348 (8 classes) | 0.245 / 0.442 (10 classes) |
+| Labelled objects of a class the model cannot output | 20.2% | 0% |
 
-**Does a higher input resolution help?** The same evaluation at `--imgsz 1280` (the images' native width):
+The **7 compared classes** are the ones both models output, without train. The test set holds a single train, in a daytime image, so its AP is all-or-nothing: the stock model found it and the fine-tuned one did not. In an 8-class mean that one object outweighs everything else and made daytime look worse after fine-tuning (0.287 to 0.272), although every other class improved in daytime too. The 7 dawn/dusk images are too few to report on their own.
+
+What the numbers show:
+- **Every class with enough test objects improved**, and the mAP over the compared classes rose by two thirds (0.174 to 0.289).
+- **Night gained most:** 0.145 to 0.275. Night accuracy went from 68% to 88% of daytime accuracy. Traffic lights at night went from AP 0.034 to 0.168.
+- **Traffic signs and riders are now detected.** Before, they were one in five labelled objects that the detector could not output at all. Riders stay weak (AP50 0.229): the training data has only 560 of them.
+- **Small objects remain the main weakness:** AP 0.084 against 0.554 for large objects.
+
+To look at the results frame by frame, `visualize_detection.py --model <weights>` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green) and missed (red), objects of classes it cannot output (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25.
+
+### How the detector was fine-tuned
+
+- **Data** (`prepare_detection_data.py`): the 10,000-image BDD100K subset minus every image whose file content equals one of the 614 test images (matched by MD5, so duplicates would be caught too): 8,447 train and 939 val images, split at random with a fixed seed. Val picks the best epoch; the test images are used only for the final comparison.
+- **Training** (`train_detector.py`): from the COCO weights, 640 px, 30 epochs (early stopping after 8 epochs without val improvement did not trigger), about 11 minutes per epoch on the GTX 1650, 5.6 hours in total. 7 of the 10 output classes start from the COCO weights of the class with the same name. Ultralytics trains in full precision on this GPU, so the batch is 4, with gradients accumulated to an effective batch of 64. Runs resume from the last finished epoch; that was needed once, when the laptop switched off during the final epoch. The best val mAP was 0.244, at the last epoch.
+- **Comparison** (`evaluate_detection.py --model .../best.pt`): the same 614 test images and settings as for the stock model.
+
+### Before fine-tuning: what limited the stock model
+
+The analysis that motivated the fine-tuning, on the stock COCO model:
+- **One in five labelled objects could not be detected at all**: COCO has no class for traffic signs (2,180 boxes) or riders (44), 2,224 of the 11,025 labelled objects (20.2%).
+- **Small objects were the weak spot:** AP 0.036 on small objects against 0.486 on large ones. Traffic lights, mostly small, scored 0.062.
+- **Night halved accuracy:** mAP 0.145 at night against 0.287 in daytime. The segmentation model, fine-tuned with night images, shows no such drop.
+
+**Would a higher input resolution have helped instead?** The stock model at `--imgsz 1280` (the images' native width):
 
 | | imgsz 640 | imgsz 1280 |
 |---|---|---|
@@ -113,26 +139,14 @@ What these numbers show:
 | Pedestrian AP50 | 0.458 | 0.554 |
 | Night mAP | 0.145 | 0.122 |
 
-Small objects and traffic lights roughly double, but large objects lose a quarter of their AP and the overall mAP stays flat. The likely reason is that the COCO weights were trained at 640, so at 1280 large objects appear at sizes the model rarely saw. Resolution alone does not fix the detector; it needs training on BDD100K. The pipeline keeps 640, which also gives the detector about four times fewer pixels to process.
-
-To look at the results frame by frame, `visualize_detection.py` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green) and missed (red), the signs and riders it cannot detect (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25.
-
-### Fine-tuning the detector on BDD100K (in progress)
-
-The detector is fine-tuned from its COCO weights on BDD100K's 10 detection classes, which adds traffic sign and rider:
-
-- **Data** (`prepare_detection_data.py`): the 10,000-image BDD100K subset minus every image whose file content equals one of the 614 test images (matched by MD5, so duplicates are caught too), split at random with a fixed seed into about 8,450 train and 940 val images. Val picks the best epoch and stops training early; the test images are used only for the final comparison.
-- **Training** (`train_detector.py`): YOLOv8s, 640 px, up to 30 epochs with early stopping after 8 epochs without val improvement. Batch 4 on the GTX 1650, where Ultralytics trains in full precision; gradients are accumulated to an effective batch of 64. Runs resume from the last finished epoch.
-- **Comparison** (`evaluate_detection.py --model .../best.pt`): the same 614 test images, reported over all 10 classes and over the 8 classes the stock model also covers, for a like-for-like before/after.
-
-Results will be added here.
+Small objects and traffic lights roughly doubled, but large objects lost a quarter of their AP and the overall mAP stayed flat. The likely reason is that the COCO weights were trained at 640, so at 1280 large objects appear at sizes the model rarely saw. Resolution alone did not fix the detector; training on BDD100K did. The pipeline keeps 640, which also gives the detector about four times fewer pixels to process.
 
 **Speed:** ~13–14 FPS combined pipeline on the GTX 1650, with segmentation running every 3rd frame. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
 
 ## Known limitations
 
 - **Portrait, handheld, or cabin-visible footage is out of scope.** The model was trained exclusively on BDD100K's landscape, windshield-mounted dashcam footage, which never shows a car's interior/dashboard. Tested directly on a handheld, portrait-orientation night/rain clip, the model correctly ignored sky/hillside/highway background but misclassified the visible dashboard as drivable area — a genuine domain-gap limitation, not a bug. **The pipeline is intended for forward-facing, dashcam-style footage (landscape, mounted, no visible cabin).**
-- **The detector uses stock COCO weights:** it cannot detect traffic signs or riders, and it is weak on small objects and at night (see [Object detection](#object-detection-yolov8s-stock-coco-weights)).
+- **Small objects are still hard for the detector** (AP 0.084 against 0.554 for large objects), riders are weak (only 560 in the training data), and trains are effectively not learned (12 training boxes).
 - **~13–14 FPS**, below real-time (30 FPS). Framed here as "near-real-time" / efficient offline processing rather than a live system.
 - Evaluated only on BDD100K-style US driving footage; robustness to other geographies, camera setups, or lighting extremes beyond the test set's distribution is untested.
 
@@ -164,4 +178,4 @@ Model checkpoints (`.pth`), video outputs (`.mp4`), and the BDD100K dataset subs
 5. Run `evaluate_test_set.py` to reproduce the segmentation results above
 6. Run `evaluate_detection.py` (needs `pycocotools`) to reproduce the detection results
 7. To fine-tune the detector: `prepare_detection_data.py`, then `train_detector.py`, then `evaluate_detection.py --model runs/bdd_det/yolov8s_bdd/weights/best.pt`
-8. Run `python pipeline.py your_clip.mp4` to generate the combined annotated output (`pipeline_output.mp4`; change it with `--output`, use the fine-tuned detector with `--detector`)
+8. Run `python pipeline.py your_clip.mp4` to generate the combined annotated output (`pipeline_output.mp4`; change it with `--output`). It uses the fine-tuned detector if `runs/bdd_det/yolov8s_bdd/weights/best.pt` exists, otherwise the COCO `yolov8s.pt`; choose with `--detector`
