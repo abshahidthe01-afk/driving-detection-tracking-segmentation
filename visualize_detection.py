@@ -2,7 +2,8 @@
 Make a video of the detector's results on the 614 test images, to look at them by eye.
 
 Each frame is one test image:
-  green   labelled object the detector found (same class, box overlap IoU >= 0.5)
+  green   labelled object the detector found (same class, box overlap IoU >= 0.5),
+          labelled with the class and confidence of the detection that found it
   red     labelled object it missed
   orange  labelled object of a class the model cannot output (traffic sign and rider
           for the stock COCO model; none after fine-tuning on BDD100K)
@@ -46,23 +47,25 @@ def match(gt, preds, threshold=IOU_MATCH):
     Greedy matching, highest confidence first, as in COCO evaluation.
 
     gt: list of (label, box); preds: list of (label, box, confidence).
-    Returns (found, matched): one flag per label (found by some detection) and one per
-    detection (matched to a label). Labels and detections match only within a class.
+    Returns (found_by, matched): for each label the index of the detection that found it
+    (None if missed), and for each detection whether it matched a label. Labels and
+    detections match only within a class.
     """
-    found = [False] * len(gt)
+    found_by = [None] * len(gt)
     matched = [False] * len(preds)
     for p in sorted(range(len(preds)), key=lambda k: -preds[k][2]):
         label, box, _ = preds[p]
         best, best_iou = None, threshold
         for g, (g_label, g_box) in enumerate(gt):
-            if found[g] or g_label != label:
+            if found_by[g] is not None or g_label != label:
                 continue
             overlap = iou(box, g_box)
             if overlap >= best_iou:
                 best, best_iou = g, overlap
         if best is not None:
-            found[best] = matched[p] = True
-    return found, matched
+            found_by[best] = p
+            matched[p] = True
+    return found_by, matched
 
 
 def text(img, s, org, colour=WHITE, scale=0.55, thickness=1):
@@ -83,27 +86,31 @@ def box(img, b, colour, label=None, thickness=2, below=False):
         text(img, label, (x1 + 2, y - 3), DARK, 0.45)
 
 
-def draw_frame(image, gt, uncoverable, preds, found, matched, title):
+def draw_frame(image, gt, uncoverable, preds, found_by, matched, title):
     """
     Return the image with a title bar, the boxes and a legend.
 
     gt: (label, box) the detector could find; uncoverable: (label, box) of classes it
-    cannot output; preds: (label, box, confidence); found / matched from match().
+    cannot output; preds: (label, box, confidence); found_by / matched from match().
     """
     h, w = image.shape[:2]
     frame = np.full((BANNER + h + LEGEND, w, 3), DARK, dtype=np.uint8)
     canvas = image.copy()
     for label, b in uncoverable:
         box(canvas, b, ORANGE, None, 1)
-    for (label, b), ok in zip(gt, found):
-        # missed labels go below the box, detection labels above: they never cover each other
-        box(canvas, b, GREEN if ok else RED, None if ok else label, 2, below=True)
     for (label, b, conf), ok in zip(preds, matched):
         if not ok:
             box(canvas, b, BLUE, f"{label} {conf:.2f}", 2)
+    # drawn after the false alarms, so found objects' labels stay readable; labels of missed
+    # objects go below their box, the others above
+    for (label, b), p in zip(gt, found_by):
+        if p is None:
+            box(canvas, b, RED, label, 2, below=True)
+        else:
+            box(canvas, b, GREEN, f"{label} {preds[p][2]:.2f}", 2)
     frame[BANNER:BANNER + h] = canvas
 
-    n_found = sum(found)
+    n_found = sum(p is not None for p in found_by)
     text(frame, title, (12, 24), WHITE, 0.6)
     stats = (f"labelled {len(gt) + len(uncoverable)}   found {n_found}   missed {len(gt) - n_found}   "
              f"class not in model {len(uncoverable)}   false alarms {matched.count(False)}")
@@ -172,20 +179,20 @@ def main():
             label = mapping.get(int(cls))
             if label is not None:
                 preds.append((label, tuple(float(v) for v in b), float(conf)))
-        found, matched = match(gt, preds)
-        items.append((fname, path, gt, uncoverable, preds, found, matched, timeofday[i], weather[i]))
+        found_by, matched = match(gt, preds)
+        items.append((fname, path, gt, uncoverable, preds, found_by, matched, timeofday[i], weather[i]))
         if n % 100 == 0:
             print(f"  {n}/{len(selected)}")
 
     if args.worst:
-        items.sort(key=lambda it: -(len(it[2]) - sum(it[5])))
+        items.sort(key=lambda it: -sum(p is None for p in it[5]))
     if args.limit:
         items = items[:args.limit]
 
     # Pass 2: draw and write the video
     writer = None
-    for fname, path, gt, uncoverable, preds, found, matched, tod, wea in items:
-        frame = draw_frame(cv2.imread(path), gt, uncoverable, preds, found, matched,
+    for fname, path, gt, uncoverable, preds, found_by, matched, tod, wea in items:
+        frame = draw_frame(cv2.imread(path), gt, uncoverable, preds, found_by, matched,
                            f"{fname}   {tod}, {wea}")
         if writer is None:
             size = (frame.shape[1], frame.shape[0])
@@ -197,7 +204,7 @@ def main():
         writer.release()
 
     total = sum(len(it[2]) for it in items)
-    found_total = sum(sum(it[5]) for it in items)
+    found_total = sum(sum(p is not None for p in it[5]) for it in items)
     print(f"\nAt confidence {CONF}: found {found_total}/{total} labelled objects of classes it can detect "
           f"({100 * found_total / max(total, 1):.1f}%), "
           f"{sum(len(it[3]) for it in items)} of classes it cannot output, "

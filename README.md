@@ -114,7 +114,9 @@ What the numbers show:
 - **Traffic signs and riders are now detected.** Before, they were one in five labelled objects that the detector could not output at all. Riders stay weak (AP50 0.229): the training data has only 560 of them.
 - **Small objects remain the main weakness:** AP 0.084 against 0.554 for large objects.
 
-To look at the results frame by frame, `visualize_detection.py --model <weights>` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green) and missed (red), objects of classes it cannot output (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25.
+**At the pipeline's confidence threshold of 0.25**, on the 390 night test images: the stock model finds 212 of the 751 labelled objects of its classes (28%) and none of the 183 signs and riders; the fine-tuned model finds 610 of all 934 labelled objects (65%). Both are right on 67% of the boxes they draw (stock 212 of 315, fine-tuned 610 of 912), so it finds more than twice as many objects at the same precision. (Found: same class and box overlap IoU ≥ 0.5.)
+
+To look at the results frame by frame, `visualize_detection.py --model <weights>` writes `detection_review.mp4`: every test image with the labelled objects the detector found (green, with the detection's class and confidence) and missed (red), objects of classes it cannot output (orange), and its false alarms (blue), at the pipeline's confidence threshold of 0.25. The counts above come from its summary line (`--only night`).
 
 ### How the detector was fine-tuned
 
@@ -141,13 +143,13 @@ The analysis that motivated the fine-tuning, on the stock COCO model:
 
 Small objects and traffic lights roughly doubled, but large objects lost a quarter of their AP and the overall mAP stayed flat. The likely reason is that the COCO weights were trained at 640, so at 1280 large objects appear at sizes the model rarely saw. Resolution alone did not fix the detector; training on BDD100K did. The pipeline keeps 640, which also gives the detector about four times fewer pixels to process.
 
-**Speed:** ~13–14 FPS combined pipeline on the GTX 1650, with segmentation running every 3rd frame. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
+**Speed:** 13–19 FPS for the combined pipeline on the GTX 1650, with segmentation running every 3rd frame. On the 1,878-frame daytime clip (1280×720): 16.5 FPS with the stock detector, 18.7 FPS with the fine-tuned one. The segmentation model is the same in both runs, yet its time went from 23 to 17 ms per frame, so a difference of this size is run-to-run variation: the fine-tuned detector (same architecture and input size) does not slow the pipeline. This is below the source video's native 30 FPS, so the system is best described as **near-real-time / efficient offline processing** rather than strictly real-time.
 
 ## Known limitations
 
 - **Portrait, handheld, or cabin-visible footage is out of scope.** The model was trained exclusively on BDD100K's landscape, windshield-mounted dashcam footage, which never shows a car's interior/dashboard. Tested directly on a handheld, portrait-orientation night/rain clip, the model correctly ignored sky/hillside/highway background but misclassified the visible dashboard as drivable area — a genuine domain-gap limitation, not a bug. **The pipeline is intended for forward-facing, dashcam-style footage (landscape, mounted, no visible cabin).**
 - **Small objects are still hard for the detector** (AP 0.084 against 0.554 for large objects), riders are weak (only 560 in the training data), and trains are effectively not learned (12 training boxes).
-- **~13–14 FPS**, below real-time (30 FPS). Framed here as "near-real-time" / efficient offline processing rather than a live system.
+- **13–19 FPS**, below real-time (30 FPS). Framed here as "near-real-time" / efficient offline processing rather than a live system.
 - Evaluated only on BDD100K-style US driving footage; robustness to other geographies, camera setups, or lighting extremes beyond the test set's distribution is untested.
 
 ## Project structure
